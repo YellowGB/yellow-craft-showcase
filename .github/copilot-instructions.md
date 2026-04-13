@@ -23,7 +23,7 @@ This is the official showcase website for **Yellow Craft**, a French software-de
 | Styling | Vanilla CSS3 (custom properties, flexbox, grid, `@layer`, `@container`) | Tailwind, Bootstrap, any CSS-in-JS, SASS/LESS (unless trivially replaced) |
 | Scripting | Minimal vanilla ES2022+ (type="module") | jQuery, Alpine, HTMX, any JS framework |
 | Build tooling | Optional lightweight bundler (Vite, esbuild) for dev convenience | webpack, heavy meta-frameworks (Next, Nuxt, Astro, etc.) |
-| Backend | Minimal server (Node/Express, Python/FastAPI, PHP, or serverless function) **only** for the contact form | No CMS, no heavy back-end framework |
+| Backend | Contact form submissions are handled by the existing **Laravel 12 PSA** running on the same nginx server, via its dedicated API endpoint | Do not build a separate backend; do not use third-party form services (Formspree, etc.) |
 | Fonts | Self-hosted `woff2` only, declared with `font-display: swap` | Google Fonts CDN at runtime |
 | Icons | Inline SVG or `<symbol>` sprite | Icon-font libraries (FontAwesome, etc.) |
 
@@ -87,13 +87,14 @@ Sections (in order):
 ### 4.2 Contact (`contact.html`)
 
 - Accessible, semantic `<form>` with proper `<label>` and `<fieldset>`
-- Required fields: Name, Email, Subject (dropdown), Message
+- Required fields: Name, Subject (dropdown), Message
+  - Contact details: display both an **Email** field and a **Phone** field; at least one must be provided. Client-side validation should check that at least one is non-empty before allowing submission; the PSA must perform the same check server-side.
 - Honeypot field (hidden, never shown to users, checked server-side)
-- CSRF token generated server-side and validated on submission
+- CSRF token is generated and validated by the Laravel PSA; include the token as a hidden field in the form
 - Client-side validation only as UX enhancement; never trust it for security
-- Server-side: rate-limiting (e.g., 5 submissions / hour per IP), email sanitisation, no raw HTML in email body
+- Server-side: rate-limiting (e.g., 5 submissions / hour per IP), input sanitisation before storing
 - Success/error feedback injected via ARIA live region (`aria-live="polite"`)
-- No third-party form services (Formspree, etc.) — use own back-end endpoint `/api/contact`
+- Submit to the Laravel PSA API endpoint (`/api/contact` on the same nginx server); on success the PSA saves the submission as a new record in its `Contact` (or equivalent) model
 
 ### 4.3 Legally mandatory pages (French law)
 
@@ -335,7 +336,7 @@ window.matchMedia('(prefers-color-scheme: dark)')
 - Every page must have a unique `<meta name="description">` (120–160 characters).
 - Use Open Graph tags (`og:title`, `og:description`, `og:image`, `og:url`, `og:type`, `og:locale`, `og:locale:alternate`).
 - Use Twitter Card tags (`twitter:card`, `twitter:title`, `twitter:description`, `twitter:image`).
-- Use `schema.org` JSON-LD on the home page: `LocalBusiness` or `ProfessionalService` type.
+- Use `schema.org` JSON-LD on the home page: `ProfessionalService` type.
 - Use `schema.org` `ContactPage` type on the contact page.
 - Provide a `sitemap.xml` at the root (auto-generated or manually maintained).
 - Provide a `robots.txt` at the root allowing all crawlers.
@@ -391,7 +392,7 @@ If any inline script is unavoidable (e.g., the theme initialisation snippet to p
 - **Honeypot:** Add a hidden `<input name="website" tabindex="-1" autocomplete="off">` field; reject submissions where it is filled.
 - **Rate limiting:** Maximum 5 requests per IP per hour; return HTTP 429 with a `Retry-After` header.
 - **Input sanitisation:** Strip/escape all HTML on the server before including in the email body; use a library (e.g., `DOMPurify` server-side or `sanitize-html` in Node).
-- **Email sending:** Use a transactional email provider (Resend, Mailgun, SendGrid) via their API — never expose SMTP credentials in client code.
+- **Submission handling:** The Laravel PSA saves the submission as a new record in its contact model — no email sending, no SMTP credentials needed in the frontend.
 - **No logging of personal data** beyond what is necessary for debugging (truncate IPs after rate-limit window expires).
 
 ---
@@ -411,9 +412,10 @@ If any inline script is unavoidable (e.g., the theme initialisation snippet to p
 
 ## 13. Internationalisation (i18n)
 
-- Default language: **French** (`lang="fr"`).
+- Default language: **French** (`lang="fr"`). Detect the visitor's preferred language on first visit using `navigator.language` (OS/browser language); if the detected language starts with `"en"` default to English, otherwise default to French. Persist the choice in `localStorage` so subsequent visits respect the user's last selection.
 - Second language: **English** (`lang="en"`).
 - Strategy: **single HTML file per page** with dynamic text replacement via `data-i18n` + JS, rather than separate HTML files per language. This simplifies maintenance but requires JS for full effect; include a `<noscript>` fallback that defaults to French content.
+  - **Performance / FOUC mitigation:** To prevent visible text swapping, embed all French strings directly as the default text content in the HTML (no placeholder). Inject a small **blocking inline script** (nonce-protected, see §11) in `<head>` — identical in pattern to the theme FOUC prevention in §12 — that reads `localStorage` (or `navigator.language`) and sets a `data-locale` attribute on `<html>` before any CSS or JS is parsed. The main ES module then reads that attribute and, if the locale is English, fetches `en.json` and swaps text nodes atomically via `textContent`. French content is already in the DOM so no network fetch is needed for the default locale, and the inline script executes synchronously before the first paint, eliminating any flash. Keep translation JSON files small (< 5 KB each) so the fetch for English is imperceptible on any connection.
 - All strings are stored in `/src/i18n/fr.json` and `/src/i18n/en.json`.
 - Date, number, and currency formatting must use the `Intl` API (e.g., `new Intl.DateTimeFormat(locale).format(date)`).
 - RTL support is not needed (FR and EN are both LTR), but structure CSS to not break if `dir="rtl"` is ever added.
@@ -493,25 +495,20 @@ Run the following checks before considering any feature complete:
 
 ## 19. Environment Variables
 
-Never hard-code secrets. The following environment variables are required by the contact form backend:
+The frontend itself has no server-side secrets. The contact form submits to the Laravel PSA API; all backend configuration (database credentials, rate-limit settings, CSRF secret, etc.) is managed within the PSA's own environment. The only value the frontend needs is the API base URL, which should be baked in at build time or set via a `<meta>` tag:
 
 ```
-EMAIL_FROM=           # Sender address (e.g. noreply@yellowcraft.fr)
-EMAIL_TO=             # Destination address
-SMTP_API_KEY=         # Transactional email provider API key
-CSRF_SECRET=          # Random 32-byte hex string for CSRF token signing
-RATE_LIMIT_WINDOW=3600  # In seconds (default: 1 hour)
-RATE_LIMIT_MAX=5        # Max submissions per window per IP
+VITE_API_BASE_URL=https://example.com   # Base URL of the Laravel PSA (same origin in production)
 ```
 
-Store these in a `.env` file locally (add `.env` to `.gitignore`); on the server, inject them via the hosting platform's secrets manager.
+Store this in a `.env` file locally (add `.env` to `.gitignore`); in production the nginx `server` block already serves both the static site and the PSA under the same origin, so the frontend can use a relative path (`/api/contact`) without any environment variable.
 
 ---
 
 ## 20. Deployment
 
-- The frontend is a collection of static HTML/CSS/JS files — deployable on any static host (Netlify, Vercel, Cloudflare Pages, or a simple VPS with nginx).
-- The contact form backend is a single serverless function or a tiny HTTP server — deploy alongside or as a separate service.
+- The frontend is a collection of static HTML/CSS/JS files served by the existing **nginx** server.
+- The contact form backend is the existing **Laravel 12 PSA** running on the same nginx server; it exposes a `/api/contact` endpoint that validates the submission, applies rate-limiting, and stores the record in its database.
 - Configure the following HTTP response headers at the server/CDN level (not in HTML meta tags):
   - CSP (see §11)
   - HSTS
